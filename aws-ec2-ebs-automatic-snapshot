@@ -1,0 +1,77 @@
+import boto3  
+import collections  
+import datetime
+
+#mention your region name
+ec = boto3.client('ec2', region_name='us-east-1')
+ec2 = boto3.resource('ec2')
+
+#begins lambda function
+def lambda_handler(event, context):  
+    #pass two parameters TagName and TagValue from event parameters
+    reservations = ec.describe_instances(
+        Filters=[
+            {'Name': 'tag-key', 'Values': [event['TagName'], event['TagValue']]},
+        ]
+    ).get(
+        'Reservations', []
+    )
+
+    instances = sum(
+        [
+            [i for i in r['Instances']]
+            for r in reservations
+        ], [])
+
+    print "Number of the Instances : %d" % len(instances)
+
+    for instance in instances:
+        try:
+            retention_days = [
+                int(t.get('Value')) for t in instance['Tags']
+                if t['Key'] == 'Retention'][0]
+        except IndexError:
+            # give default retention period if not passing from tag
+            retention_days = 14
+
+        delete_date = datetime.date.today() + datetime.timedelta(days=retention_days)
+        delete_fmt = delete_date.strftime('%Y-%m-%d')
+        
+        print "Starting snapshot for instance %s" % (instance['InstanceId'])
+        
+        for dev in instance['BlockDeviceMappings']:
+            if dev.get('Ebs', None) is None:
+                continue
+            vol_id = dev['Ebs']['VolumeId']
+
+            ec2 = boto3.resource('ec2')
+            vol = ec2.Volume(id=vol_id)
+            vol_name = None
+            isSnapshot = 'Yes'
+            
+            for tag in vol.tags:
+                if tag['Key'] == 'Name':
+                    vol_name = tag.get('Value')
+                elif tag['Key'] == 'Snapshot':
+                    isSnapshot = tag.get('Value')
+            
+            if isSnapshot == 'No':
+                print "No snapshot for %s" % (vol_name)
+                continue
+                    
+            snap = ec.create_snapshot(
+                VolumeId=vol_id,
+                Description=vol_name + ' - ' + str(datetime.datetime.today()),
+                TagSpecifications=[
+                    {
+                        'ResourceType': 'snapshot',
+                        'Tags': [
+                            {'Key': 'DeleteOn', 'Value': delete_fmt},
+                            {'Key': 'Name', 'Value': vol_name + ' - ' + str(datetime.date.today())},
+                        ]
+                    },
+                ],
+            )
+            
+            print "Created snapshot for %s to be deleted on %s" % (vol_name, delete_fmt)
+            
